@@ -6,34 +6,31 @@ public class Card : MonoBehaviour
     private Vector3 offset;
     private bool isDragging = false;
     private Vector3 originalPos;
-
-    public SpriteRenderer frontRenderer;
-    public SpriteRenderer backRenderer;
-
-    private static readonly Vector3 LockedScale = Vector3.one * 0.3f;  // to disable card rescaling from another script
+    public SpriteRenderer frontRenderer, backRenderer, outlineRenderer;
     private HandManager handManager;
-    public bool isPlayerCard, isAICard;
+    public bool isPlayerCard, isAICard, isSpread;
+    [HideInInspector] public bool isDiscarded = false;
 
-    private bool isDiscarded = false;
+    [Header("Card ID"), Tooltip("Card ID")]
+    public int cardValue;
+    public enum Suit { Clubs, Spades, Hearts, Diamonds }
+    public Suit cardSuit;
+    public bool canDiscard = true;
 
-    // [SerializeField] private int cardValue;
+
 
     void Awake()
     {
-        EnforceScale();
         handManager = GameObject.Find("HandManager").GetComponent<HandManager>();
-    }
-
-    void LateUpdate()
-    {
-        if (transform.localScale != LockedScale)
-            transform.localScale = LockedScale;
+        ShowBack();
+        Highlight(false); // Highlight is off by default
+        transform.localScale = Vector3.zero * 0.6f;
     }
 
     void OnMouseDown()
     {
-        // 🚫 Prevent dragging if card is already discarded
-        if (isDiscarded) return;
+        // Prevent dragging if card is already discarded or in AI hand
+        if (isDiscarded && !isPlayerCard && GameManager.Instance.canStartRound == false) return;
 
         Vector3 mouseWorld = Camera.main.ScreenToWorldPoint(Input.mousePosition);
         mouseWorld.z = 0f;
@@ -42,12 +39,15 @@ public class Card : MonoBehaviour
         originalPos = transform.position;
         isDragging = true;
 
-        GetComponent<SpriteRenderer>().sortingOrder = 10;
+        GetComponent<SpriteRenderer>().sortingOrder = 50;    // Once you've touched on a card that is not AIs, it will come to the front, using 10 for now
+        SetFace(frontRenderer.sprite);    // Show the front sprite and disable the back according to the SetFace method
+
+        handManager.OnCardClicked(this);
     }
 
     void OnMouseDrag()
     {
-        if (isDragging && !isDiscarded)
+        if (isDragging && !isDiscarded && isPlayerCard)
         {
             Vector3 mouseWorld = Camera.main.ScreenToWorldPoint(Input.mousePosition);
             mouseWorld.z = 0f;
@@ -65,17 +65,10 @@ public class Card : MonoBehaviour
 
         if (isPlayerCard)
             handManager.UpdatePosAndUI();
+
     }
 
     public void SetFace(Sprite faceSprite) => frontRenderer.sprite = faceSprite;
-
-    public void Flip(float duration = 0.5f)
-    {
-        Sequence seq = DOTween.Sequence();
-        seq.Append(transform.DOScaleX(0f, duration / 2))
-           .AppendCallback(ShowFront)
-           .Append(transform.DOScaleX(LockedScale.x, duration / 2));
-    }
 
     // methods to handle card back and front rendering, flipping...
     public void ShowFront()
@@ -90,9 +83,40 @@ public class Card : MonoBehaviour
         backRenderer.enabled = true;
     }
 
-    public void EnforceScale() => transform.localScale = LockedScale;
+    public void Highlight(bool state)
+    {
+        if (outlineRenderer != null)  // Check first, safer codin'
+            outlineRenderer.enabled = state; // this is the sprite way 
+        else
+            Debug.LogWarning($"{gameObject.name} is missing highlight Sprite!");
+    }
+
+
+    public void FlipCard(bool showFront, float duration = 0.5f)
+    {
+        float halfDuration = duration / 2f;
+
+        // Rotate to halfway (Y 90°)
+        transform.DORotate(new Vector3(0, 90, 0), halfDuration)
+            .SetEase(Ease.InOutSine)
+            .OnComplete(() =>
+            {
+                // Mid-flip — switch visibility
+                frontRenderer.enabled = showFront;
+                backRenderer.enabled = !showFront;
+
+                // Instantly reset to zero
+                transform.DORotate(new Vector3(0, 0, 0), 0f);
+
+                // Optional: slight bounce for flair
+                transform.DOPunchScale(Vector3.one * 0.1f, 0.2f, 5, 1)
+                        .SetDelay(0.01f);
+            });
+    }
 
     public void MarkDiscarded() => isDiscarded = true;
 
     public void ResetDiscard() => isDiscarded = false;
+
+    
 }
