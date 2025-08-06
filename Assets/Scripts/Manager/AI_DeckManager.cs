@@ -14,7 +14,7 @@ public class AI_DeckManager : MonoBehaviour
         public string aiName;
         public SplineContainer splineContainer;
         public List<SplineContainer> spreadContainers; // <-- now supports multiple spreads
-        public Text handCountText, AITotalCardsValue;
+        public Text handCountText, DeckTotal, AITotalCardsValue;
         public List<GameObject> handCards = new();
 
         private int currentSpreadIndex = 0;
@@ -58,7 +58,7 @@ public class AI_DeckManager : MonoBehaviour
 
     [Space(10), Header("Gameplay Settings"), Tooltip("Gameplay Settings")]
     [SerializeField] public int maxHandSize = 5;
-    [SerializeField] private AudioClip dealClip, spreadClip;
+    [SerializeField] private AudioClip dealClip, spreadClip, knockClip;
 
     [Space(10), Header("AI Hands"), Tooltip("Gameplay Settings")]
     [SerializeField] private List<AIHand> aiHands = new();
@@ -72,11 +72,19 @@ public class AI_DeckManager : MonoBehaviour
     private HandManager handManager;
     [SerializeField] private Transform discardTargetPos;
 
-    [SerializeField] private Text WinnerText;
-
-
     private AudioSource audioSource;
     private Vector2 lastScreenSize;
+
+
+    [Header("Game Over Settings!"), Tooltip("Game Over Settings!")]
+    [SerializeField] private Text WinnerText, displayText;
+    public GameObject KnockSymbol;
+    private int AI1WinCount = 0, AI2WinCount = 0, PlayerWinCount = 0;
+    [SerializeField] public GameObject[] AIWinDisplay, AI2WinDisplay, PlayerWinDisplay;
+    private bool alreadyWon = false;
+    private float Difficulty => GameManager.Instance.AiDifficultyLevel;
+
+
 
     void Start()
     {
@@ -87,6 +95,9 @@ public class AI_DeckManager : MonoBehaviour
 
         UpdateSplinePositionsToScreen(); // Initial position
         lastScreenSize = new Vector2(Screen.width, Screen.height);
+        LoadWinData();
+
+        // ResetWinData();
     }
 
     void Update()
@@ -106,7 +117,8 @@ public class AI_DeckManager : MonoBehaviour
         AIHand ai = aiHands[aiIndex];
         if (ai.handCards.Count >= maxHandSize) return;
 
-        GameObject card = deckManager.DrawCardFromDeck();
+        GameObject card = deckManager.RemoveCardFromDeck();
+        
         if (card == null) return;
 
         card.transform.DOKill(true);
@@ -133,31 +145,36 @@ public class AI_DeckManager : MonoBehaviour
         if (GameManager.Instance.canStartRound == true)
         {
             CheckAITonk(ai);      // Declare Tonk if valid
+            GameManager.Instance.HasNotCheckedTonk = false;
         }
     }
 
-
     public IEnumerator DrawAndDiscard(int aiIndex)
     {
-        Card topCard = discardPile.GetLastCard(discardPile.discardedCards);
-
-        // if topcard is going to easily form a valid spread, either book or run, then call Draw from Discard method
-        if (CanFormSetOrRun(topCard, aiIndex))
+        if (GameManager.Instance.canStartRound == true)
         {
-            AIDrawFromDiscard(aiIndex);
-            audioSource.PlayOneShot(dealClip);
-            Debug.Log($"{aiHands[aiIndex].aiName} drew {topCard.cardValue} of {topCard.cardSuit} from discard.");
-        }
-        else
-        {
-            Debug.Log($"{aiHands[aiIndex].aiName} skipped drawing {topCard.cardValue} of {topCard.cardSuit} from discard.");
-            DrawCardToAI(aiIndex);
-            audioSource.PlayOneShot(dealClip);
-        }
+            Card topCard = discardPile.GetLastCard(discardPile.discardedCards);
 
-        yield return new WaitForSeconds(1.5f);
+            // if topcard is going to easily form a valid spread, either book or run, then call Draw from Discard method
 
-        EvaluateAndDiscardFromAI(aiIndex);
+            if (Difficulty >= 0.75f && CanFormSetOrRun(topCard, aiIndex))  // First difficulty check
+            {
+                AIDrawFromDiscard(aiIndex);
+                audioSource.PlayOneShot(dealClip);
+                Debug.Log($"{aiHands[aiIndex].aiName} drew {topCard.cardValue} of {topCard.cardSuit} from discard.");
+            }
+            else
+            {
+                DrawCardToAI(aiIndex);
+                audioSource.PlayOneShot(dealClip);
+                Debug.Log($"{aiHands[aiIndex].aiName} skipped drawing {topCard.cardValue} of {topCard.cardSuit} from discard and drew from Deck.");
+            }
+
+            // Either ways AI draws a card first before discarding
+            yield return new WaitForSeconds(1f);
+
+            EvaluateAndDiscardFromAI(aiIndex);
+        }
     }
 
     public void EvaluateAndDiscardFromAI(int aiIndex)
@@ -165,88 +182,95 @@ public class AI_DeckManager : MonoBehaviour
         if (aiIndex < 0 || aiIndex >= aiHands.Count) return;
 
         AIHand ai = aiHands[aiIndex];
+
+        // PHASE 1: Lay spreads FIRST
+        SendValidSpreadsToSpline(aiIndex);
+
+        StartCoroutine(WaitAndDiscard(aiIndex));
+    }
+
+    private IEnumerator WaitAndDiscard(int aiIndex)
+    {
+        yield return new WaitForSeconds(0.5f); // Let cards settle
+
+        AIHand ai = aiHands[aiIndex];
         var allCards = ai.handCards.Select(c => c.GetComponent<Card>()).Where(c => c != null).ToList();
 
-        HashSet<Card> keepers = new(); // Cards we won't discard
+        HashSet<Card> keepers = new();
 
-        // === 1. Detect BOOKS (3+ of same value) ===
+        // === PHASE 2: Detect NEAR BOOKS ===
         var valueGroups = allCards.GroupBy(c => c.cardValue);
         foreach (var group in valueGroups)
         {
-            if (group.Count() >= 3)
+            if (group.Count() >= 2)
             {
-                foreach (var card in group)
-                    keepers.Add(card);
-                Debug.Log($"{ai.aiName} found a BOOK with value {group.Key}");
-
-                SendValidSpreadsToSpline(aiIndex);
-            }
-        }
-
-        // === 2. Detect NEAR BOOKS (2 of same value) ===
-        foreach (var group in valueGroups)
-        {
-            if (group.Count() == 2)
-            {
-                foreach (var card in group)
-                    keepers.Add(card);
-                Debug.Log($"{ai.aiName} has NEAR BOOK: {group.Key}s");
-            }
-        }
-
-        // === 3. Detect RUNS (3+ same suit, consecutive values) ===
-        var suitGroups = allCards.GroupBy(c => c.cardSuit);
-        foreach (var group in suitGroups)
-        {
-            var sorted = group.OrderBy(c => c.cardValue).ToList();
-            for (int i = 0; i < sorted.Count - 2; i++)
-            {
-                int val1 = sorted[i].cardValue;
-                int val2 = sorted[i + 1].cardValue;
-                int val3 = sorted[i + 2].cardValue;
-
-                if (val2 == val1 + 1 && val3 == val2 + 1)
+                if (Difficulty >= 0.7f || (group.Count() == 2 && Difficulty >= 0.4f))
                 {
-                    keepers.Add(sorted[i]);
-                    keepers.Add(sorted[i + 1]);
-                    keepers.Add(sorted[i + 2]);
-                    Debug.Log($"{ai.aiName} found a RUN: {val1}-{val2}-{val3} of {group.Key}");
-                    SendValidSpreadsToSpline(aiIndex);
+                    foreach (var card in group)
+                        keepers.Add(card);
+
+                    Debug.Log($"{ai.aiName} identified NEAR BOOK: {group.Key}s");
                 }
             }
         }
 
-        // === 4. Detect NEAR RUNS (2 same suit, with small gap) ===
+        // === PHASE 3: Detect NEAR RUNS ===
+        var suitGroups = allCards.GroupBy(c => c.cardSuit);
         foreach (var group in suitGroups)
         {
             var sorted = group.OrderBy(c => c.cardValue).ToList();
+
             for (int i = 0; i < sorted.Count - 1; i++)
             {
                 int valA = sorted[i].cardValue;
                 int valB = sorted[i + 1].cardValue;
 
-                if (valB - valA <= 2) // allow small gaps
+                // Check if cards are within 2 values of each other (e.g., 4 & 6)
+                if (valB - valA <= 2)
                 {
-                    keepers.Add(sorted[i]);
-                    keepers.Add(sorted[i + 1]);
-                    Debug.Log($"{ai.aiName} has NEAR RUN: {valA} & {valB} of {group.Key}");
+                    if (Difficulty >= 0.7f || (valB - valA == 1 && Difficulty >= 0.4f))
+                    {
+                        keepers.Add(sorted[i]);
+                        keepers.Add(sorted[i + 1]);
+
+                        Debug.Log($"{ai.aiName} identified NEAR RUN: {valA} & {valB} of {group.Key}");
+                    }
                 }
             }
         }
 
-        // === 5. Discardable Cards ===
-        var discardables = allCards.Except(keepers).ToList();
-        if (discardables.Count == 0)
+        // === PHASE 4: Determine discard options ===
+        List<Card> discardables;
+
+        if (Difficulty < 0.4f)
         {
-            Debug.Log($"{ai.aiName} has no obvious discard. Picking highest value card.");
-            discardables = allCards.OrderByDescending(c => c.cardValue).ToList();
+            // Dumb AI just picks randomly from hand
+            discardables = allCards.OrderBy(c => Random.value).ToList();
+            Debug.Log($"{ai.aiName} is low IQ, discarding randomly 😵");
+        }
+        else
+        {
+            discardables = allCards.Except(keepers).ToList();
+
+            if (discardables.Count == 0)
+            {
+                Debug.Log($"{ai.aiName} has no obvious discard. Picking highest value card.");
+                discardables = allCards.OrderByDescending(c => c.cardValue).ToList();
+            }
         }
 
-        // === 6. Prefer discarding least common suit, then highest value ===
+        if (!GameManager.Instance.canStartRound)
+        {
+            Debug.Log("Game already won — no discard.");
+            yield break;
+        }
+
+        // === PHASE 5: Choose discard ===
         var suitCounts = allCards.GroupBy(c => c.cardSuit).ToDictionary(g => g.Key, g => g.Count());
+
         Card discardCard = discardables
-            .OrderBy(c => suitCounts[c.cardSuit])        // Least common suit
-            .ThenByDescending(c => c.cardValue)          // Then highest value
+            .OrderBy(c => suitCounts[c.cardSuit])
+            .ThenByDescending(c => c.cardValue)
             .First();
 
         StartCoroutine(DiscardCardFromAI(aiIndex, discardCard));
@@ -283,15 +307,16 @@ public class AI_DeckManager : MonoBehaviour
     public void UpdateAIHand(AIHand ai)   // Update each AI hands
     {
         ai.AITotalCardsValue.text = ai.GetTotalHandValue().ToString();
+        ai.DeckTotal.text = ai.GetTotalHandValue().ToString();
 
-        if (ai.handCards.Count == 0 && GameManager.Instance.canStartRound == true)
+        if (ai.handCards.Count == 0 && GameManager.Instance.canStartRound && !alreadyWon)
         {
-            gameOver();
+            DetermineWinner();  // <-- Round over
+            Debug.Log("AI won by finishing cards in hand!");
         }
 
         else if (ai.handCards.Count > 0)
         {
-
             float cardSpacing = 1f / maxHandSize;
             float firstCardPosition = 0.5f - (ai.handCards.Count - 1) * cardSpacing / 2;
             Spline spline = ai.splineContainer.Spline;
@@ -323,11 +348,38 @@ public class AI_DeckManager : MonoBehaviour
                 }
             }
         }
+        // deckManager.startReshuffling();
 
         TryKnock(ai);
         ai.handCountText.text = ai.handCards.Count.ToString();
     }
 
+    public void UpdateAllAIHands()
+    {
+        foreach (var ai in aiHands)
+            UpdateAIHand(ai);
+    }
+
+    // This method allows the AI deck position to be postitioned according to screen resolution this happens in start alone, doesn't happen mid-game
+    private void UpdateSplinePositionsToScreen()
+    {
+        Canvas.ForceUpdateCanvases(); // Force UI to update positions/layouts
+
+        for (int i = 0; i < Mathf.Min(aiScreenAnchors.Count, aiSplineContainers.Count); i++)
+        {
+            Vector3 worldPos = GetWorldPositionFromRect(aiScreenAnchors[i]);
+            aiSplineContainers[i].position = worldPos;
+        }
+    }
+
+    // Returns a Vector3 for repositioning
+    private Vector3 GetWorldPositionFromRect(RectTransform rect)
+    {
+        Vector3 screenPos = RectTransformUtility.WorldToScreenPoint(null, rect.position);
+        Vector3 worldPos = Camera.main.ScreenToWorldPoint(screenPos);
+        worldPos.z = 0f; // Since it's 2D
+        return worldPos;
+    }
 
     public void SendValidSpreadsToSpline(int aiIndex)
     {
@@ -450,78 +502,6 @@ public class AI_DeckManager : MonoBehaviour
         return sameValueCount >= 2 || suitStreak >= 2;
     }
 
-
-    public void UpdateAllAIHands()
-    {
-        foreach (var ai in aiHands)
-            UpdateAIHand(ai);
-    }
-
-    // This method allows the AI deck position to be postitioned according to screen resolution this happens in start alone, doesn't happen mid-game
-    private void UpdateSplinePositionsToScreen()
-    {
-        Canvas.ForceUpdateCanvases(); // Force UI to update positions/layouts
-
-        for (int i = 0; i < Mathf.Min(aiScreenAnchors.Count, aiSplineContainers.Count); i++)
-        {
-            Vector3 worldPos = GetWorldPositionFromRect(aiScreenAnchors[i]);
-            aiSplineContainers[i].position = worldPos;
-        }
-    }
-
-    // Returns a Vector3 for repositioning
-    private Vector3 GetWorldPositionFromRect(RectTransform rect)
-    {
-        Vector3 screenPos = RectTransformUtility.WorldToScreenPoint(null, rect.position);
-        Vector3 worldPos = Camera.main.ScreenToWorldPoint(screenPos);
-        worldPos.z = 0f; // Since it's 2D
-        return worldPos;
-    }
-
-    // Check individual AI Tonk
-    public void CheckAITonk(AIHand ai)
-    {
-        int total = ai.GetTotalHandValue();
-
-        if (total < 49 && !GameManager.Instance.canStartRound == true) return;
-
-        Debug.Log($"{ai.aiName} can declare TONK! Total value: {total}");
-        // gameOver();
-
-        // TODO: Add logic like forcing AI to declare, auto discard, win animation, etc.
-
-    }
-
-    void TryKnock(AIHand ai)
-    {
-        if (!GameManager.Instance.canStartRound) return;
-
-        int handValue = ai.GetTotalHandValue();
-        float confidence = 0f;
-
-        // Confidence based on low hand value
-        if (handValue <= 7) confidence += 0.7f;
-        else if (handValue <= 10) confidence += 0.4f;
-
-        // Clamp confidence between 0 and 1
-        confidence = Mathf.Clamp01(confidence);
-
-        // Random decision influenced by confidence
-        float chance = Random.Range(0f, 1f);
-        Debug.Log($"{ai.aiName} | Value: {handValue} | Confidence: {confidence:F2} | Chance Rolled: {chance:F2}");
-
-        if (chance < confidence)
-        {
-            // gameOver();
-            Debug.LogWarning("AI just knocked!");
-        }
-        else if (Random.value < 0.05f)
-        {
-            // gameOver();
-            Debug.LogWarning("AI just knocked!");
-        }
-    }
-
     public void AIDrawFromDiscard(int aiIndex)
     {
         if (aiIndex < 0 || aiIndex >= aiHands.Count && discardPile.discardedCards.Count <= 0) return;
@@ -552,6 +532,35 @@ public class AI_DeckManager : MonoBehaviour
         {
             Debug.LogWarning("AI tried to draw from an empty discard pile.");
         }
+    }  
+
+    // Check individual AI Tonk
+    public void CheckAITonk(AIHand ai)
+    {
+        int total = ai.GetTotalHandValue();
+
+        if ( Difficulty >= 0.5f && total >= 49 && !GameManager.Instance.canStartRound == true && GameManager.Instance.HasNotCheckedTonk == true)
+        {
+            Debug.Log($"{ai.aiName} can declare TONK! Total value: {total}");
+            GameManager.Instance.TonkWin();
+
+            WinnerText.text = ai.aiName + "has declared Tonk";
+            GameManager.Instance.PlayerLost();
+        }
+    }
+    
+    void TryKnock(AIHand ai)
+    {
+        if (!GameManager.Instance.canStartRound) return;
+
+        int handValue = ai.GetTotalHandValue();
+        int RandomValueForKnock = Random.Range(2, 7);
+
+        if (handValue <= RandomValueForKnock)
+        {
+            StartCoroutine(CallKnock());
+            Debug.LogWarning("AI just knocked!");
+        }
     }
 
     // Check all AI Tonk
@@ -563,14 +572,10 @@ public class AI_DeckManager : MonoBehaviour
         }
     }
 
-    public void gameOver()
-    {
-        DetermineWinner(); // Method to determine the winner based on the lowest hand value
-        GameManager.Instance.RoundOver();
-    }
-
     public void DetermineWinner()
     {
+        if (alreadyWon == true) return;
+
         int playerHandValue = handManager.GetTotalHandValue();
         string winnerName = "Player";
         int lowestValue = playerHandValue;
@@ -585,18 +590,102 @@ public class AI_DeckManager : MonoBehaviour
             }
         }
 
-        Debug.Log($"{winnerName} wins with a hand value of {lowestValue}!");
-
-        // Update the win UI
-        WinnerText.text = $"{winnerName} wins!\nHand Value: {lowestValue}";
-
-        // Bounce for flair
+        Debug.Log($"{winnerName} wins!");
+        WinnerText.text = $"{winnerName} wins!";
         WinnerText.transform.localScale = Vector3.zero;
         WinnerText.transform.DOScale(Vector3.one, 0.5f).SetEase(Ease.OutBounce);
 
-        // Optional slow-mo for dramatic tension
+        // Time slow
         Time.timeScale = 0.5f;
         DOVirtual.DelayedCall(2f, () => Time.timeScale = 1f);
+
+        // Handle Win Count
+        if (winnerName == "Player")
+        {
+            PlayerWinCount++;
+            PlayerPrefs.SetInt("PlayerWins", PlayerWinCount);
+            if (PlayerWinCount <= PlayerWinDisplay.Length)
+                PlayerWinDisplay[PlayerWinCount - 1].SetActive(true);
+
+            GameManager.Instance.PlayerWon();
+        }
+        else if (winnerName == "Miles_Morales")
+        {
+            AI1WinCount++;
+            PlayerPrefs.SetInt("AI1Wins", AI1WinCount);
+            if (AI1WinCount <= AIWinDisplay.Length)
+                AIWinDisplay[AI1WinCount - 1].SetActive(true);
+
+            GameManager.Instance.PlayerLost();
+        }
+        else if (winnerName == "Vegas_Dealer_001")
+        {
+            AI2WinCount++;
+            PlayerPrefs.SetInt("AI2Wins", AI2WinCount);
+            if (AI2WinCount <= AI2WinDisplay.Length)
+                AI2WinDisplay[AI2WinCount - 1].SetActive(true);
+
+            GameManager.Instance.PlayerLost();
+        }
+
+        PlayerPrefs.Save();
+        alreadyWon = false;
+    }
+
+    private void LoadWinData()
+    {
+        AI1WinCount = PlayerPrefs.GetInt("AI1Wins", 0);
+        AI2WinCount = PlayerPrefs.GetInt("AI2Wins", 0);
+        PlayerWinCount = PlayerPrefs.GetInt("PlayerWins", 0);
+
+        for (int i = 0; i < AI1WinCount && i < AIWinDisplay.Length; i++)
+            AIWinDisplay[i].SetActive(true);
+
+        for (int i = 0; i < AI2WinCount && i < AI2WinDisplay.Length; i++)
+            AI2WinDisplay[i].SetActive(true);
+
+        for (int i = 0; i < PlayerWinCount && i < PlayerWinDisplay.Length; i++)
+            PlayerWinDisplay[i].SetActive(true);
+    }
+
+    public void ResetWinData()
+    {
+        AI1WinCount = 0;
+        AI2WinCount = 0;
+        PlayerWinCount = 0;
+
+        PlayerPrefs.DeleteKey("AI1Wins");
+        PlayerPrefs.DeleteKey("AI2Wins");
+        PlayerPrefs.DeleteKey("PlayerWins");
+
+        foreach (var go in AIWinDisplay)
+            go.SetActive(false);
+        foreach (var go in AI2WinDisplay)
+            go.SetActive(false);
+        foreach (var go in PlayerWinDisplay)
+            go.SetActive(false);
+
+        PlayerPrefs.Save();
+    }
+
+    public void PlayerKnock()
+    {
+        StartCoroutine(CallKnock());
+    }
+
+    public IEnumerator CallKnock()
+    {
+        displayText.text = "KNOCK";
+        KnockSymbol.transform.localScale = Vector3.zero;
+        yield return KnockSymbol.transform.DOScale(Vector3.one, 0.5f).SetEase(Ease.OutBounce);
+        yield return KnockSymbol.transform.DOScale(Vector3.one, 0.5f).SetEase(Ease.OutBounce);
+        audioSource.PlayOneShot(knockClip);
+        Time.timeScale = 0.5f;
+        DOVirtual.DelayedCall(2f, () => Time.timeScale = 1f);
+
+        yield return new WaitForSeconds(3f);
+
+        DetermineWinner();
     }
 
 }

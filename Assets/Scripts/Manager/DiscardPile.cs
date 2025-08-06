@@ -12,7 +12,9 @@ public class DiscardPile : MonoBehaviour
     public bool canSnap = false;  // Enables snapping functionality
 
     private HandManager handManager;
-    [HideInInspector] public List<Card> discardedCards = new List<Card>();
+    public List<Card> discardedCards = new List<Card>();
+    AudioSource audioSource;
+    public AudioClip discardClip;
 
     void Awake()
     {
@@ -23,6 +25,7 @@ public class DiscardPile : MonoBehaviour
     void Start()
     {
         handManager = GameObject.Find("HandManager").GetComponent<HandManager>();
+        audioSource = GetComponent<AudioSource>();
     }
 
 
@@ -62,16 +65,20 @@ public class DiscardPile : MonoBehaviour
         {
             handManager.RemoveCard(card);
             card.Highlight(false);
+            handManager.DisableDiscarding();
         }
 
         discardedCards.Add(card);
+        audioSource.PlayOneShot(discardClip);
     }
+    
+    public void PlayDiscardClip() => audioSource.PlayOneShot(discardClip);
 
     public void CheckNumberOfDiscardedCards()
     {
         if (discardedCards.Count > 0)
         {
-            Card lastCard = discardedCards[discardedCards.Count - 1];
+            Card lastCard = discardedCards.Last();
             Debug.Log("Last discarded card: " + lastCard.name);
         }
         else
@@ -79,8 +86,8 @@ public class DiscardPile : MonoBehaviour
             Debug.Log("No cards have been discarded yet.");
         }
 
-        string message = discardedCards.Count > 0 
-            ? "Discarded cards available." 
+        string message = discardedCards.Count > 0
+            ? "Discarded cards available."
             : "No discarded cards available.";
 
         Debug.Log(message);
@@ -89,6 +96,24 @@ public class DiscardPile : MonoBehaviour
     public Card GetLastCard(List<Card> discardedCards)
     {
         return discardedCards.Count > 0 ? discardedCards.Last() : null;
+    }
+
+    public Card RetainLastCardAndClearRest()
+    {
+        if (discardedCards.Count == 0) return null;
+
+        Card lastCard = discardedCards.Last();
+
+        for (int i = 0; i < discardedCards.Count - 1; i++)
+        {
+            var card = discardedCards[i];
+            card.transform.SetParent(null);
+            ResetCardSorting(card);
+        }
+
+        discardedCards = new List<Card> { lastCard };
+
+        return lastCard;
     }
 
     /// Applies sorting order to both front and back renderers

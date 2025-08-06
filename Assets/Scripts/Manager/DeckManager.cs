@@ -7,28 +7,56 @@ using UnityEngine.UI;
 public class DeckManager : MonoBehaviour
 {
     [Header("Prefabs & Positions")]
-    public GameObject [] cardPrefabs;
+    public GameObject[] cardPrefabs;
     public Transform deckPos;
-    public Transform playerHandPos,  discardPilePos, deckTransform;
+    public Transform playerHandPos, discardPilePos, deckTransform;
 
     private List<GameObject> deck = new List<GameObject>();
     private List<GameObject> aiCards = new List<GameObject>(); // AI hand
 
     private HandManager handManager;
     private TurnIndicatorLogic turnIndicator;
+    private DiscardPile discardPile;
     AI_DeckManager AIManager;
-    [SerializeField] private Text deckCountText;
+    private int counterDownTime = 3;
+    [SerializeField] private Text deckCountText, displayText;
     private AudioSource audioSource;
     public AudioClip dealClip;
     public AudioClip[] shuffleSound;  // Initially wanted making it play random clips during shuffle, this will be on pause for now
-    public Button DrawButton;
+
+    [SerializeField] private GameObject BetSlip;
+
 
     void Start()
     {
         audioSource = GetComponent<AudioSource>();
         handManager = GameObject.Find("HandManager").GetComponent<HandManager>();
         AIManager = GameObject.Find("AiDeckManager").GetComponent<AI_DeckManager>();
-        turnIndicator = FindFirstObjectByType <TurnIndicatorLogic>();  //  I like this newly learnt method of finding reference
+        discardPile = FindFirstObjectByType<DiscardPile>();
+
+        turnIndicator = FindFirstObjectByType<TurnIndicatorLogic>();   //  Cool reference finding 
+
+        BetSlip.SetActive(true);
+    }
+
+    public void BeginCountdown()
+    {
+        StartCoroutine(StartCountdown());
+    }
+
+    IEnumerator StartCountdown()
+    {
+        float currentTime = counterDownTime;
+
+        while (currentTime > 0)
+        {
+            currentTime -= Time.deltaTime;
+            yield return null;
+
+            displayText.text = Mathf.CeilToInt(currentTime).ToString();
+        }
+
+        displayText.text = "";
         CreateFullDeck();
         ShuffleDeck();
         StartCoroutine(AnimateShuffle());
@@ -82,62 +110,126 @@ public class DeckManager : MonoBehaviour
             card.transform.DORotate(Vector3.zero, 0.3f);
         }
 
-        yield return new WaitForSeconds(0.25f);
+        yield return new WaitForSeconds(0.4f);
         yield return StartCoroutine(DealCardsToAllPlayers(5));
         yield return new WaitForSeconds(0.5f);
+
+        handManager.DisableDiscarding();
+        GameManager.Instance.canStartRound = true;      // Allow gameplay
 
         // Allow DiscardPile start snapping now, because initially the snap functionality did not allow cards to reach the second AI position
         var discard = FindFirstObjectByType<DiscardPile>();
         if (discard != null) discard.canSnap = true;
     }
 
+    IEnumerator ReShuffleDeck()
+    {
+        yield return new WaitForSeconds(1f);
+
+        // Step 1: Retain the last discarded card
+        Card lastCard = discardPile.RetainLastCardAndClearRest();
+        if (discardPile == null || lastCard == null) yield break;
+
+        // Step 2: Find all cards in the scene that are marked as discarded but not the last one
+        List<Card> reshuffleCandidates = new List<Card>();
+
+        foreach (Card card in FindObjectsByType<Card>(FindObjectsSortMode.None))
+        {
+            if (card != lastCard && card.isDiscarded)
+            {
+                reshuffleCandidates.Add(card);
+            }
+        }
+
+        // Step 3: Animate them toward the deck pile
+        for (int i = 0; i < reshuffleCandidates.Count; i++)
+        {
+            Card card = reshuffleCandidates[i];
+            card.transform.SetParent(null); // Detach from previous parent
+
+            float z = -0.01f * (deck.Count + i); // So they stack behind the current deck
+            Vector3 targetPos = deckTransform.position;
+            discardPile.PlayDiscardClip();
+
+            card.transform.DOMove(targetPos, 0.5f).SetEase(Ease.InOutSine);
+            card.transform.DORotate(Vector3.zero, 0.3f);
+            card.ShowBack();
+
+            yield return new WaitForSeconds(0.05f);
+        }
+
+        yield return new WaitForSeconds(0.6f);
+
+        // Step 4: Parent to deckTransform and stack properly
+        for (int i = 0; i < reshuffleCandidates.Count; i++)
+        {
+            Card card = reshuffleCandidates[i];
+            GameObject cardObj = card.gameObject;
+
+            card.transform.SetParent(deckTransform, true);
+
+            float z = -0.01f * (deck.Count + i); // Continue layering behind
+            Vector3 stackedPos = deckTransform.position + new Vector3(0, 0, z);
+
+            card.transform.DOMove(stackedPos, 0.8f).SetEase(Ease.InOutSine);
+            card.transform.DORotate(Vector3.zero, 0.5f);
+
+            deck.Add(cardObj);
+            card.isDiscarded = false;
+        }
+
+        Debug.Log("Reshuffle complete! Cards returned to deck.");
+    }
+
+
     IEnumerator DealCardsToAllPlayers(int cardsEach)
     {
         for (int i = 0; i < cardsEach; i++)
         {
-            yield return new WaitForSeconds(0.35f);
-
+            AIManager.DrawCardToAI(1);   // Second AI
             audioSource.PlayOneShot(dealClip);
-            handManager.DrawCardFromDeck();  // Function in in handManager.cs that enables player hand to draw card from deck
 
-            yield return new WaitForSeconds(0.35f);
+            yield return new WaitForSeconds(0.4f);
 
-            AIManager.DrawCardToAI(0);  // Deal to first AI from the AIDeckManager.cs
+            AIManager.DrawCardToAI(0);   // First AI
+            audioSource.PlayOneShot(dealClip);
 
-            yield return new WaitForSeconds(0.35f);   // Brief wait
+            yield return new WaitForSeconds(0.4f);
 
-            AIManager.DrawCardToAI(1);   // Deal to second AI..... and could go on for the third, fourth, etc
+            handManager.DrawCardFromDeck();  // Player
+            audioSource.PlayOneShot(dealClip);
+
+            yield return new WaitForSeconds(0.4f);
         }
 
-        yield return new WaitForSeconds(1f);  // Wait for a brief second
+        yield return new WaitForSeconds(1f);
 
-        // Deal one card to the discard pile - a public gameobject transform...
-        var discardCard = DrawCardFromDeck();
+        // Deal one to discard pile
+        var discardCard = RemoveCardFromDeck();
         if (discardCard != null)
         {
-            discardCard.transform.SetParent(null);
+            discardCard.transform.SetParent(discardPilePos); // Reparent the discard card to the discardPilePos
             discardCard.transform.DOMove(discardPilePos.position, 0.5f).SetEase(Ease.OutCubic);
             discardCard.GetComponent<Card>().FlipCard(true);
             audioSource.PlayOneShot(dealClip);
+            discardPile.discardedCards.Add(discardCard.GetComponent<Card>()); // Just fixed this, it was omitted initially, meaning...
+                                                                              // ...I only added animated a card to that position without actually adding that card to the discard List<>
+            
             yield return new WaitForSeconds(0.7f);
         }
 
-        // After that Re-stack the remaining cards and move to new position - a public gameObject transform - deckTransform
         ReStackDeck();
 
-        yield return new WaitForSeconds(1);
+        yield return new WaitForSeconds(1f);
 
-        handManager.FlipPlayerCards();  // Flip player cards ready to play
-
+        handManager.FlipPlayerCards();
         yield return new WaitForSeconds(0.4f);
-        turnIndicator.ShowIndicator();
 
-        // Allow gameplay
-        GameManager.Instance.canStartRound = true;
-        handManager.DisableDiscarding();
+        turnIndicator.ShowIndicator();
     }
- 
-    // Method to move the deck pile back to the draw position with a speed of 0.8f, move gracefully
+
+
+    // Method to move the deck pile back to the draw position with a speed of 0.8f
     private void ReStackDeck()
     {
         for (int i = 0; i < deck.Count; i++)
@@ -151,7 +243,7 @@ public class DeckManager : MonoBehaviour
         }
     }
 
-    public GameObject DrawCardFromDeck()
+    public GameObject RemoveCardFromDeck()
     {
         if (deck.Count == 0) return null;
         var card = deck[0];
@@ -166,40 +258,39 @@ public class DeckManager : MonoBehaviour
 
     IEnumerator AITurn(int cardsEach)   //  Temporary method to enable enemy drawing
     {
+        startReshuffling();
+
         for (int i = 0; i < cardsEach; i++)
         {
+            float AIThinkingTime = Random.Range(1f, 3.5f);
+
             turnIndicator.NextTurn();  // Bleeping indicator game object shows on the next player and deactivates on the rest
-
-            float AIThinkingTime = Random.Range(2f, 6f);
-            
-            yield return new WaitForSeconds(1.5f); 
-
+            yield return new WaitForSeconds(AIThinkingTime);
             StartCoroutine(AIManager.DrawAndDiscard(0));
-            yield return new WaitForSeconds(1.8f); 
-            
+            yield return new WaitForSeconds(3f);
+
             turnIndicator.NextTurn();   // Bleeping indicator game object shows on the next player and deactivates on the rest
-
             yield return new WaitForSeconds(AIThinkingTime);   // Brief wait to simulate AI thinking capability
-
-            // AIManager.DrawCardToAI(1);   // Deal to second AI.....
-            audioSource.PlayOneShot(dealClip);
             StartCoroutine(AIManager.DrawAndDiscard(1));
-            yield return new WaitForSeconds(1.8f); 
+            yield return new WaitForSeconds(3f);  // Total time it takes for the AIs to think, evaluate discardable card, and eventually discard
 
             turnIndicator.NextTurn();  // Bleeping indicator game object shows on the next player and deactivates on the rest
-
-            yield return new WaitForSeconds(1.8f);  // Total time it takes for the AIs to think, evaluate discardable card, and eventually discard
- 
         }
 
         GameManager.Instance.PlayerTurn();
     }
 
-
+    //
     public void Update()
     {
         deckCountText.text = deck.Count.ToString();  // I'll fix this somewhere so that it doesn't run everyframe
     }
 
+    public void startReshuffling()
+    {
+        if (deck.Count == 0)
+        {
+            StartCoroutine(ReShuffleDeck());
+        }
+    }
 }
-

@@ -17,8 +17,6 @@ public class Card : MonoBehaviour
     public Suit cardSuit;
     public bool canDiscard = true;
 
-
-
     void Awake()
     {
         handManager = GameObject.Find("HandManager").GetComponent<HandManager>();
@@ -47,7 +45,7 @@ public class Card : MonoBehaviour
 
     void OnMouseDrag()
     {
-        if (isDragging && !isDiscarded && isPlayerCard)
+        if (isDragging && !isDiscarded && isPlayerCard && GameManager.Instance.canStartRound == true)
         {
             Vector3 mouseWorld = Camera.main.ScreenToWorldPoint(Input.mousePosition);
             mouseWorld.z = 0f;

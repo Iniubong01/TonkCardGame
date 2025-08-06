@@ -6,19 +6,16 @@ using DG.Tweening;
 using UnityEngine.UI;
 using System.Collections;
 
-
 public class HandManager : MonoBehaviour
 {
     [SerializeField] private int maxHandSize, spreadSize; // max no. of cards allowed in player deck
     [SerializeField] private SplineContainer splineContainer;  // drawn spline shape
     public SplineContainer[] spreadSplines; // Assign these in Inspector
     private int currentSpreadIndex = 0;     // Tracks which spread we're laying now
-    [SerializeField] private Text playerCardText, playerTotalCardsValue;  // shows the reminaining no. of cards in player hand
+    [SerializeField] private Text playerCardText, DeckTotal, playerTotalCardsValue;  // shows the reminaining no. of cards in player hand
     private List<GameObject> handCards = new();
-
     private DeckManager deckManager;
     private DiscardPile discardPile; // Reference to the discard pile
-
     private AudioSource audioSource;
     public AudioClip dealClip, spreadClip;
     public GameObject LastDrawnCard { get; private set; }  // getter to ensure that plae=yer card x axis scale is not messed with after initial card dealing
@@ -32,6 +29,7 @@ public class HandManager : MonoBehaviour
     public List<Card> currentlySelectedCards = new();
     public Button spreadButton, DiscardDrawButton; // Assign in inspector
     public Button DrawButton;
+    bool HasNotCheckedTonk = true;
 
     private void Start()
     {
@@ -53,30 +51,67 @@ public class HandManager : MonoBehaviour
     {
         if (handCards.Count >= maxHandSize) return;
 
-        GameObject card = deckManager.DrawCardFromDeck();
+        GameObject card = deckManager.RemoveCardFromDeck();
         if (card == null) return;
 
         LastDrawnCard = card;
-        var cardComp = card.GetComponent<Card>();
-        cardComp.isPlayerCard = true;
+
+        // Kill lingering tweens
         card.transform.DOKill(true);
 
-        handCards.Add(card);
-        UpdateCardPositions();
-        UpdateHandCountUI();
-        audioSource.PlayOneShot(dealClip);
+        var cardComp = card.GetComponent<Card>();
+        cardComp.isPlayerCard = true;
+        cardComp.canDiscard = true;
 
-        if (GameManager.Instance.canStartRound)
-        {
-            // Only allow discard if it's during the player's turn and not during initial dealing
-            if (GameManager.Instance.playerHasDrawnThisTurn == false)
+        Vector3 targetPos = transform.position;
+        card.transform.DOMove(targetPos, 0.4f)
+            .SetEase(Ease.OutCubic)
+            .OnComplete(() =>
             {
-                GameManager.Instance.playerHasDrawnThisTurn = true;
-                cardComp.FlipCard(true, 0.75f);
-                DrawButton.interactable = false;
-                DiscardDrawButton.interactable = false;
-                EnableDiscarding();
-            }
+                // Reparent after move so it doesn’t jump mid-animation
+                card.transform.SetParent(transform);
+                handCards.Add(card);
+                UpdateCardPositions();
+                UpdateHandCountUI();
+
+                if (GameManager.Instance.canStartRound == true)
+                {
+                    EnableDiscarding();
+                    discardPile.canSnap = true;
+                    cardComp.ShowFront();
+                    DiscardDrawButton.interactable = false;
+                    DrawButton.interactable = false;
+                }
+            });
+    }
+
+    public void DrawFromDiscard()
+    {
+        if (!GameManager.Instance.canStartRound == true) return;
+
+        Card topCard = discardPile.GetLastCard(discardPile.discardedCards);
+
+        if (topCard != null)
+        {
+            handCards.Add(topCard.gameObject); // Add to player's hand list
+
+            topCard.transform.SetParent(transform); // Reparent under player hand UI
+            topCard.isPlayerCard = true;
+            topCard.isDiscarded = false;
+
+            // Remove it from discard pile
+            discardPile.discardedCards.Remove(topCard);
+
+            UpdateCardPositions();
+            UpdateHandCountUI();
+            DiscardDrawButton.interactable = false;
+            DrawButton.interactable = false;
+            EnableDiscarding();
+        }
+
+        else
+        {
+            Debug.Log("Discard pile is empty.");
         }
     }
 
@@ -97,6 +132,8 @@ public class HandManager : MonoBehaviour
             if (obj.TryGetComponent(out Card c))
                 c.canDiscard = true;
         }
+
+        discardPile.canSnap = true;
         Debug.Log("Enabled Discarding again");
     }
 
@@ -171,16 +208,16 @@ public class HandManager : MonoBehaviour
         else
         {
             if (GameManager.Instance.canStartRound)
-                GameManager.Instance.RoundOver();
-            Debug.Log("Player has won!");
+                Debug.Log("Player has won!");
+                GameManager.Instance.PlayerWon();
         }
     }
-
 
     public void UpdateHandCountUI()
     {
         playerCardText.text = handCards.Count.ToString();
         playerTotalCardsValue.text = GetTotalHandValue().ToString();  // Get total value for win UI display
+        DeckTotal.text = GetTotalHandValue().ToString();  // Get total value for win UI display
     }
 
     void Update()
@@ -273,15 +310,17 @@ public class HandManager : MonoBehaviour
         Debug.Log($"Total Hand Value: {GetTotalHandValue()}");
     }
 
-    private void CheckDeclareTonk() // Check in player hand so that if their card value is up to 49 or 50, then debug that they can declare tonk
+    private void DeclareTonk()
+    // Check in player hand so that if their card value is up to 49 or 50
     {
         int totalValue = GetTotalHandValue();
 
-        // For example, Tonk can be declared if total <= 50
-        if (totalValue >= 49)
+        // For example, Tonk can be declared if total >= 49
+        if (totalValue >= 49 && HasNotCheckedTonk)
         {
             Debug.Log("Player can declare TONK! Total hand value: " + totalValue);
-            GameManager.Instance.RoundOver();
+            GameManager.Instance.TonkWin();
+            HasNotCheckedTonk = false;
         }
     }
 
@@ -461,35 +500,6 @@ public class HandManager : MonoBehaviour
         Debug.Log("Spread laid successfully!");
     }
 
-    public void DrawFromDiscard()
-    {
-        if (!GameManager.Instance.canStartRound == true) return;
-        
-        Card topCard = discardPile.GetLastCard(discardPile.discardedCards);
-
-        if (topCard != null)
-        {
-            handCards.Add(topCard.gameObject); // Add to player's hand list
-
-            topCard.transform.SetParent(transform); // Reparent under player hand UI
-            topCard.isPlayerCard = true;
-            topCard.isDiscarded = false;
-
-            // Optional: Move the card visually
-
-            // Remove it from discard pile
-            discardPile.discardedCards.Remove(topCard);
-
-            UpdateCardPositions();
-            UpdateHandCountUI();
-            DiscardDrawButton.interactable = false;
-        }
-
-        else
-        {
-            Debug.Log("Discard pile is empty.");
-        }
-    }
 
 }
 
